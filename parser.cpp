@@ -1,3 +1,4 @@
+// by weeki
 #include <iostream>
 #include <string>
 #include <map>
