@@ -49,6 +49,8 @@ public:
     static HTMLNode* create() {
         return new HTMLNode();
     }
+
+    friend class HTMLParser;
     
     /// @brief 
     HTMLNode();
@@ -72,10 +74,14 @@ public:
         return children.size();
     }
 
+    /// @brief iterator begin
+    /// @return iterator
     auto begin() {
         return children.begin();
     }
 
+    /// @brief iterator end
+    /// @return iterator
     auto end() {
         return children.end();
     }
@@ -95,6 +101,12 @@ public:
 
     /// @brief 
     /// @return 
+    inline std::string getTextContent() const {
+        return textContent;
+    }
+
+    /// @brief 
+    /// @return 
     inline std::string tagName() const {
         return tag;
     }
@@ -108,11 +120,11 @@ public:
 
 
 private:
-    std::string tag;
-    std::string textContent;
+    std::string                        tag;
+    std::string                        textContent;
     std::map<std::string, std::string> attribs;
-    std::vector<HTMLNode*> children;
-    HTMLNode* parent = nullptr;
+    std::vector<HTMLNode*>             children;
+    HTMLNode*                          parent = nullptr;
 };
 
 
@@ -151,6 +163,11 @@ protected:
     /// @param tagName 
     /// @return 
     int parseTagName(std::string & tagName);
+
+    /// @brief 
+    /// @param tag 
+    /// @return 
+    int readClosingTag(std::string& tag);
     
     /// @brief 
     /// @param result 
@@ -204,9 +221,11 @@ protected:
     }
 
     void __pushResetState() {
-        oldLine       = line;
-        oldColmn      = colmn;
-        oldReadingPos = readingPos;
+        if (!badState()) {
+            oldLine       = line;
+            oldColmn      = colmn;
+            oldReadingPos = readingPos;
+        }
     }
 
     void pushResetState() {
@@ -245,25 +264,33 @@ protected:
         return readingPos + 1 < rawLen() ? htmlRawDocument[readingPos + 1] : -1;
     }
 
+    void skipEmptyChars() {
+        if (readChar(false) == ' ')
+            skipUntilNot(' ');
+
+        if (readChar(false) == '\n')
+            skipUntilNot('\n');
+    }
+
 private:
     std::string filepath;
     std::string htmlRawDocument;
-    bool sourceLoaded = false;
+    bool sourceLoaded    = false;
     
-    HTMLNode* root = nullptr;
+    HTMLNode* root       = nullptr;
 
-    size_t readingPos = 0;
+    size_t readingPos    = 0;
 
     
     // for debugging
-    size_t line       = 0;
-    size_t colmn      = 0;
+    size_t line          = 0;
+    size_t colmn         = 0;
 
     size_t oldLine       = 0;
     size_t oldColmn      = 0;
     size_t oldReadingPos = 0;
 
-    int parserState = 0;
+    int parserState      = 0;
 };
 
 HTMLNode::HTMLNode(std::string tag) : tag{tag} {}
@@ -342,10 +369,30 @@ int HTMLParser::parseChildrenOf(HTMLNode* node) {
     return 0;
 }
 
+// either in: [HERE...<%TAG%></%TAG>]
+// or in: [<T1></T1>, ..., <Tn></Tn>]HERE...
 int HTMLParser::parseTextContent(HTMLNode* node) {
     if (badState())
         return parserState;
 
+    if (!node)
+        return parsingError(-1);
+
+    std::string content = node->getTextContent();
+
+    while(available()) {
+        char ch = readChar();
+        if (ch == '<')
+        {
+            putback(1);
+            break;
+        } else if (ch == '\n') 
+            continue;
+        else
+            content.push_back(ch);
+    }
+
+    node->setTextContent(content);
 
     return 0;
 }
@@ -361,43 +408,73 @@ bool HTMLParser::badState() const {
 }
 
 int HTMLParser::parseInternal(HTMLNode* node) {
-
+    if (badState())
+        return parserState;
     // look for either token < or an alpha char
 
-    if (readChar(false) == ' ')
-        skipUntilNot(' ');
-
-    auto ch = readChar();
-
-    bool firstCharFound = false;
+    skipEmptyChars();
     
-    if (ch == '<') {
+    bool firstCharFound = false;
 
-        HTMLNode* n = HTMLNode::create();
+    while(available()) {
 
-        parseTag(n);
-        
-        // <%TAG%>...[<T1>, <T2>, ..., <Tn>]</%TAG%>
-        parseChildrenOf(n); // this can recurse.
+        auto ch = readChar();
 
-        if (badState())
-            return LogError();
-    } else {
-        
-        putback(1);
+        if (ch == '<') {
 
-        if (!firstCharFound) {
-            firstCharFound = true;
-            // HERE...<%TAG%>
-            parseTextContent(node);
+            skipEmptyChars();
 
-            if (nextChar() == '<')
-                parseInternal(node);
+            if (!available())
+                return 0;
+
+            if (readChar() == '/')
+            {
+                
+                std::string closingTag;
+
+                readClosingTag(closingTag);
+                
+                if (closingTag != node->tagName())
+                    return parsingError(-2);
+
+                return 0;
+            }
+
+            putback(1);
+
+            HTMLNode* n = HTMLNode::create();
+            n->parent   = node;
+
+            node->appendNode(n);
+
+            parseTag(n);
+            
+            // <%TAG%>...[<T1>, <T2>, ..., <Tn>]</%TAG%>
+            //parseChildrenOf(n); // this can recurse.
+
+
+            parseInternal(n);
+
+
+            if (badState())
+                return LogError();
+        } else {
+            
+            putback(1);
+
+            if (!firstCharFound) {
+                firstCharFound = true;
+                // HERE...<%TAG%>
+                parseTextContent(node);
+            } else {
+                skipEmptyChars();
+                        
+                // </%TAG%>HERE...
+                parseTextContent(node);
+            }
         }
-    }
 
-    // <%TAG%>...</%TAG%>HERE...
-    parseTextContent(node);
+    }
 
     return 0;
 }
@@ -412,12 +489,12 @@ int HTMLParser::parseTagName(std::string & tagName) {
     while (available()) {
         char ch = readChar();
 
-        if (ch == '>' || ch == ' ') {
+        if (ch == '>' || ch == ' ' || ch == '\n') {
             tagName       = result;
             tagNameParsed = true;
         }
 
-        if (ch == ' ' && tagNameParsed)
+        if ((ch == ' '  || ch == '\n') && tagNameParsed)
             skipUntil('>');
 
         if (tagNameParsed)
@@ -430,6 +507,11 @@ int HTMLParser::parseTagName(std::string & tagName) {
     return 0;
 }
 
+
+int HTMLParser::readClosingTag(std::string& tag) {
+    return parseTagName(tag);
+}
+
 int HTMLParser::parseTag(HTMLNode* result) {
 
     if (badState())
@@ -440,11 +522,6 @@ int HTMLParser::parseTag(HTMLNode* result) {
     if (!result)
         return parsingError(-1);
 
-    if (readChar() == ' ')
-        skipUntilNot(' ');
-    else
-        putback(1);
-
     std::string tagName;
 
     int ts = parseTagName(tagName);
@@ -452,8 +529,6 @@ int HTMLParser::parseTag(HTMLNode* result) {
         return parsingError(ts);
 
     result->setTagName(tagName);
-
-    std::cout << "parsed tag name: " << result->tagName() << std::endl;
 
     return 0;
 }
@@ -495,13 +570,26 @@ char HTMLParser::readChar(bool advance) {
     return c;
 }
 
+void printChildren(HTMLNode* node) {
+
+    std::cout << "text content of " << node->tagName() << ": " << std::endl;
+    std::cout << node->getTextContent() << std::endl;    
+
+
+    if (node->childrenCount() > 0) {
+        for (auto c : *node) {
+            printChildren(c);
+        }
+    }
+
+}
+
 int main() {
     HTMLParser p{"./test.html"};
 
     p.parse();
 
-    if (p.document())
-        p.document()->printChildren();
-
+    printChildren(p.document()->setTagName("document"));
+        
     return 0;
 }
